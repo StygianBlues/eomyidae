@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 #
-# © 2019 Christoph Lohmann <20h@r-36.net>
-#
-# This file is published under the terms of the GPLv3.
+# See the LICENSE file for details.
 #
 
 import os
