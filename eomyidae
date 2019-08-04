@@ -1,0 +1,633 @@
+#!/usr/bin/env python
+# coding=utf-8
+#
+# © 2019 Christoph Lohmann <20h@r-36.net>
+#
+# This file is published under the terms of the GPLv3.
+#
+
+import os
+import sys
+import getopt
+import urllib.parse
+import socket
+import io
+import pickle
+import time
+import hashlib
+import errno
+import random
+import operator
+import math
+from multiprocessing import Pool
+from datetime import datetime
+from datetime import timedelta
+
+def parseuri(uri):
+	urls = urllib.parse.urlparse(uri, allow_fragments=False)
+	if ":" in urls.netloc:
+		(host, port) = urls.netloc.split(":")[:2]
+	else:
+		host = urls.netloc
+		port = 70
+
+	mtype = "1"
+	if len(urls.path) > 1:
+		mtype = urls.path[1]
+
+	if len(urls.path) > 2:
+		if len(urls.query) > 0:
+			selector = "%s?%s" % (urls.path[2:], urls.query)
+		else:
+			selector = urls.path[2:]
+	else:
+		selector = ""
+
+	return (host, port, mtype, selector) 
+
+def poolgopher(req):
+	data = gopher(req[0], req[1], req[2], req[3])
+	req.append(data)
+	return req 
+
+def gopher(uri=None, host=None, port=70, selector=""):
+	#print("gopher(uri = %s, host = %s, port = %d, selector = %s)" % \
+	#		(uri, host, port, selector))
+	if uri != None:
+		(host, port, mtype, selector) = parseuri(uri)
+		port = int(port)
+
+	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	s.settimeout(20)
+	try:
+		s.connect((host, port))
+	except socket.gaierror:
+		return ""
+	except socket.timeout:
+		return ""
+	except TimeoutError:
+		return ""
+	except ConnectionResetError:
+		return ""
+	except OverflowError:
+		return ""
+	except OSError as e:
+		# No route to host.
+		if e.errno == 113:
+			return ""
+
+	try:
+		s.send(("%s\r\n" % (selector)).encode("utf-8"))
+	except BrokenPipeError:
+		return ""
+
+	fd = s.makefile("b")
+	try:
+		data = fd.read()
+	except socket.timeout:
+		fd.close()
+		return ""
+	except ConnectionResetError:
+		fd.close()
+		return ""
+	fd.close()
+
+	try:
+		content = data.decode(errors='replace')
+	except UnicodeDecodeError:
+		content = data.decode("iso-8859-1")
+
+	return content
+
+def parsemenu(data):
+	menu = []
+	lines = data.split("\n")
+	for line in lines:
+		line = line.strip()
+		if len(line) < 1:
+			continue
+
+		mtype = line[0]
+
+		# Last entry
+		if mtype == ".":
+			break
+
+		elements = line[1:].split("\t")
+		if len(elements) < 4:
+			continue
+		(description, selector, host, port) = elements[:4]
+		menu.append([mtype, description, selector, host, port])
+
+	return menu
+
+def menu2text(menu):
+	text = ""
+	for entry in menu:
+		if type(entry[1]) != str:
+				continue
+
+		text += "%s\n" % (entry[1])
+	
+	return text
+
+## Robots.txt
+# https://en.wikipedia.org/wiki/Robots.txt
+# # Comment
+# User-agent: somebot
+# Disallow: /path
+# Allow: /path
+# Crawl-delay: seconds
+# Sitemap: /some/sitemap.xml
+def parserobots(data):
+	robots = []
+	lines = data.split("\n")
+	for line in lines:
+		line = line.strip()
+		if "#" in line:
+			(line, comment) = line.split("#", 1)
+		if len(line) < 0:
+			# Empty line, needed for bot-specific rules.
+			robots.append(["",""])
+			continue
+		if not ":" in line:
+			continue
+
+		(header, value) = line.strip().split(":", 1)
+		value = value.strip().lower()
+		header = header.strip().lower()
+		robots.append([header, value])
+	return robots
+
+def adaptrobots(robotsdata):
+	filterlines = {}
+	robotslines = parserobots(robotsdata)
+	i = 0
+
+	allowlines = []
+	disallowlines = []
+	otherlines = []
+	iseomyidae = False
+	while i < len(robotslines):
+		header = robotslines[i][0].lower()
+		value = robotslines[i][1]
+		if header == "user-agent":
+			ua = value.split("/")
+			if ua[0] == "eomyidae" or ua[0] == "*":
+				iseomyidae = 1
+			else:
+				iseomyidae = 0
+		elif header == "allow" and iseomyidae == True:
+			allowlines.append(value)
+		elif header == "disallow" and iseomyidae == True:
+			disallowlines.append(value)
+		elif header == "":
+			iseomyidae = False
+		else:
+			if iseomyidae == True:
+				otherlines.append([header, value])
+		i += 1
+
+	filterlines["allow"] = allowlines
+	filterlines["disallow"] = disallowlines
+	filterlines["other"] = otherlines
+	if len(allowlines) > 0 or len(disallowlines) > 0 \
+			or len(otherlines) > 0:
+		filterlines["empty"] = False
+	else:
+		filterlines["empty"] = True
+	
+	return filterlines
+
+def mkpath(cachepath):
+	try:
+		os.makedirs(cachepath)
+	except OSError as e:
+		if e.errno != errno.EEXIST:
+			raise
+
+def mkopen(cachefile):
+	if not os.path.exists(cachefile):
+		fd = open(cachefile, "xb")
+	else:
+		fd = open(cachefile, "wb")
+	return fd
+
+def informserveradmin(uri, host=None, port=70):
+	if host == None:
+		(host, port, mtype, selector) = parseuri(uri)
+		port = int(port)
+
+	# We are nice and inform before every robots.txt, how to contact us.
+	gopher(host=host, port=port, selector="This is eomyidae, your "
+			"friendly crawler. See "
+			"gopher://gopherproject.org/1/eomyidae for "
+			"more info. Have a nice day!")
+
+def cacherobots(cachedir, uri, host=None, port=70, force=False, \
+		filtercache=None):
+	if host == None:
+		(host, port, mtype, selector) = parseuri(uri)
+		port = int(port)
+
+	if filtercache != None and host in filtercache:
+		#print("Got filterlines from memory filtercache.")
+		return filtercache[host]
+
+	print("Getting robots for %s:%d" % (host, port))
+
+	cachepath = "%s/%s:%d" % (cachedir, host, port)
+	mkpath(cachepath)
+
+	cacherobotstxt = "%s/robots.txt" % (cachepath)
+	cacherobotspickle = "%s/robots.pickle" % (cachepath)
+	filterlines = {}
+	if not os.path.exists(cacherobotstxt) or force == True:
+		# Be nice.
+		informserveradmin(uri=uri, host=host, port=port)
+
+		robotsdata = gopher(host=host, port=port, selector="/robots.txt")
+		print("Got new robots.txt.")
+		print(robotsdata)
+		robotstxtfd = mkopen(cacherobotstxt)
+		robotstxtfd.write(robotsdata.encode())
+		robotstxtfd.close()
+
+		filterlines = adaptrobots(robotsdata)
+		# Do not store if there is nothing, so we save I/O later.
+		if filterlines["empty"] == False:
+			print("Storing filterlines.")
+			storelistdb(cacherobotspickle, filterlines)
+
+	else:
+		if os.path.exists(cacherobotspickle):
+			#print("Loading filterlines from cache.")
+			filterlines = loadlistdb(cacherobotspickle)
+		else:
+			#print("No filterlines available in cache.")
+			filterlines["empty"] = True
+
+	#print(filterlines)
+	if filtercache != None:
+		filtercache[host] = filterlines
+
+	return filterlines
+
+def selectorisallowed(filterlines, selector):
+	if filterlines["empty"] == True:
+		return True
+
+	def robotsmatch(pattern, selector):
+		#print("pattern = %s, selector = %s" % (pattern, selector))
+		if pattern == '*':
+			#print("Just start match.")
+			return True
+		elif pattern[0] == '*':
+			#print("Begins with star.")
+			if pattern[-1] == '*':
+				#print("Begins and ends with star.")
+				if pattern[1:-1] in selector:
+					#print("Matches.")
+					return True
+				else:
+					return False
+			else:
+				return selector.endswith(pattern[1:])
+		elif pattern[-1] == '*':
+			#print("Ends with star.")
+			return selector.startswith(pattern[:-1])
+		else:
+			return selector.startswith(pattern)
+
+	isallowed = True
+	for line in filterlines["disallow"]:
+		# TODO: Should this be match everything?
+		if len(line) == 0:
+			continue
+		if robotsmatch(line, selector) == True:
+			#print("isallowed = False")
+			isallowed = False
+	for line in filterlines["allow"]:
+		# TODO: Should this be match everything?
+		if len(line) == 0:
+			continue
+		if robotsmatch(line, selector) == True:
+			#print("isallowed = True")
+			isallowed = True
+
+	#print("isallowed = %d" % (isallowed))
+	return isallowed
+
+def loadselectorstxt(filename):
+	selectors = []
+
+	if os.path.exists(filename):
+		fd = open(filename, "r")
+		for line in fd:
+			fields = line.split("|")
+			selectors.append(fields)
+		fd.close()
+	
+	return selectors
+
+def loadlist(filename):
+	listelems = []
+
+	if os.path.exists(filename):
+		fd = open(filename, "r")
+		for line in fd:
+			line = line.strip()
+			if len(line) == 0:
+				continue
+			if line[0] == "#":
+				continue
+			listelems.append(line)
+		fd.close()
+	
+	return listelems
+
+def loadlistdb(filename):
+	listelems = []
+
+	if os.path.exists(filename):
+		fd = open(filename, "rb")
+		try:
+			listelems = pickle.load(fd)
+		except EOFError:
+			return []
+		fd.close()
+	
+	return listelems
+
+def storelistdb(filename, listelems):
+	fd = mkopen(filename)
+	pickle.dump(listelems, fd)
+	fd.close()
+
+def storerawdata(cachedir, uri, data, host=None, port=70):
+	if host == None:
+		(host, port, mtype, selector) = parseuri(uri)
+		port = int(port)
+
+	cachepath = "%s/%s:%s" % (cachedir, host, port)
+	mkpath(cachepath)
+
+	m = hashlib.sha256()
+	m.update(uri.encode())
+	urihash = m.hexdigest()
+
+	cachepath = "%s/%s.menu" % (cachepath, urihash)
+	fd = mkopen(cachepath)
+	#print("Storing %s at %s" % (uri, cachepath))
+	fd.write(("%s\n" % (uri)).encode())
+	fd.write(data.encode())
+	fd.close()
+
+def usage(app):
+	app = os.path.basename(app)
+	print("usage: %s [-hor] [-b base] [-f blocklist] [-w n] [starturl]" % (app), file=sys.stderr)
+	sys.exit(1)
+
+def main(args):
+	try:
+		opts, largs = getopt.getopt(args[1:], "hb:f:ow:r")
+	except getopt.GetoptError as err:
+		print(str(err))
+		usage(args[0])
+
+	blocklistfile = None
+	blocklist = []
+
+	base = "."
+	starturi = None
+	workernum = 1
+	robotscache = {}
+	forcehostscount = False
+	for o, a in opts:
+		if o == "-h":
+			usage(args[0])
+		elif o == "-b":
+			base = a
+		elif o == "-f":
+			blocklistfile = a
+			blocklist = loadlist(blocklistfile)
+			print("blocklist: %s" % (blocklist))
+		elif o == "-o":
+			forcehostscount = True
+		elif o == "-r":
+			# Do not cache robots.txt in memory.
+			robotscache = None
+		elif o == "-w":
+			try:
+				workernum = int(a)
+			except ValueError:
+				workernum = 1
+		else:
+			assert False, "unhandled option"
+
+	os.chdir(base)
+	cachedir = "%s/cache" % (base)
+
+	if len(largs) > 0:
+		starturi = largs[0]
+
+	knownuris = loadlistdb("knownuris.pickle")
+	lastlenknownuris = len(knownuris)
+
+	def isblocked(uri):
+		for rule in blocklist:
+			if uri.startswith(rule):
+				return True
+		return False
+
+	def addhostscount(host):
+		if host in hostscount:
+			hostscount[host] += 1
+		else:
+			hostscount[host] = 1
+
+	def subhostscount(host):
+		if host in hostscount:
+			hostscount[host] -= 1
+			if hostscount[host] <= 0:
+				del hostscount[host]
+
+	def addhostscache(host, uri, port=70):
+		if uri in knownuris:
+			#print("ignored for queue: %s" % (uri))
+			return
+		if host == "":
+			#print("ignored for queue: %s" % (uri))
+			return
+		if isblocked(uri):
+			print("blocked by filters: %s" % (uri))
+			return
+
+		try:
+			port = int(port)
+		except ValueError:
+			return
+
+		addhostscount(host)
+
+		filterrules = cacherobots(cachedir, uri, \
+				host=host, \
+				port=port, \
+				filtercache=robotscache)
+		if selectorisallowed(filterrules, selector) == True:
+			if not host in hostscache:
+				hostscache[host] = {}
+			if not "queue" in hostscache[host]:
+				hostscache[host]["queue"] = {}
+			hostscache[host]["queue"][uri] = None
+			#print("pushed to queue: %s" % (uri))
+		else:
+			pass
+			#print("blocked by robots: %s" % (uri))
+
+	def getqueuelen():
+		queuelen = 0
+		for host in hostscache:
+			queuelen += len(hostscache[host]["queue"])
+		return queuelen
+
+	hostscache = loadlistdb("hostscache.pickle")
+	if hostscache == []:
+		hostscache = {}
+	hostscount = loadlistdb("hostscount.pickle")
+	if hostscount == [] or forcehostscount == True:
+		hostscount = {}
+		for host in list(hostscache.keys()):
+			print("host = %s, queuelen = %d" \
+					% (host, \
+					   len(hostscache[host]["queue"])))
+			if len(hostscache[host]["queue"]) == 0:
+				del hostscache[host]
+				continue
+			for uri in hostscache[host]["queue"]:
+				(host, port, mtype, selector) = parseuri(uri)
+				addhostscount(host)
+
+	def storestate():
+		if blocklistfile != None:
+			blocklist = loadlist(blocklistfile)
+			if len(blocklist) > 0:
+				print("blocklist: %s" % (blocklist))
+		print("################## Storing state to disc.")
+		storelistdb("knownuris.pickle", knownuris)
+		storelistdb("hostscache.pickle", hostscache)
+		storelistdb("hostscount.pickle", hostscount)
+		print("################## Storing state to disc done.")
+
+	jobs = []
+	if starturi != None:
+		if not isblocked(starturi):
+			(starthost, startport, startmtype, startselector) = parseuri(starturi)
+			addhostscache(hostscache, starthost, starturi)
+			try:
+				jobs.append([starturi, starthost, int(startport), startselector])
+			except ValueError:
+				# Please fix your URI.
+				pass
+
+	# Store state keeper.
+	startnow = datetime.now()
+	storedelta = timedelta(seconds=10) # 30 seconds
+
+	lastlenknownhosts = len(hostscache)
+	lastlenuriqueue = getqueuelen()
+	while lastlenuriqueue > 0:
+		if len(jobs) < workernum:
+			for host in list(hostscache.keys()):
+				if len(hostscache[host]["queue"]) == 0:
+					del hostscache[host]
+					if host in hostscount:
+						del hostscount[host]
+
+			selhosts = sorted(hostscount.items(), \
+					key=operator.itemgetter(1))[:workernum*2]
+
+			# Give hosts with many selectors more jobs.
+			hostjobs = {}
+			for selhost in selhosts:
+				# 10 ** x
+				hostjobs[selhost[0]] = \
+					math.floor(math.log10(selhost[1]))
+				if hostjobs[selhost[0]] == 0:
+					hostjobs[selhost[0]] = 1
+			print("Queue Status: %s" % (hostjobs))
+
+			for selhost in selhosts:
+				selhost = selhost[0]
+				seluris = hostscache[selhost]["queue"]
+				while hostjobs[selhost] > 0:
+					if len(seluris) == 0:
+						break
+					jobitem = seluris.popitem()
+					if isblocked(jobitem[0]):
+						continue
+					(host, port, mtype, selector) = parseuri(jobitem[0])
+					jobs.append([jobitem[0], host, port, selector])
+					hostjobs[selhost] -= 1
+
+		print("Getting %d jobs." % (len(jobs)))
+
+		dataresults = []
+		with Pool(processes=workernum) as pool:
+			dataresults = pool.map(poolgopher, jobs)
+			#data = gopher(host=host, port=port, selector=selector)
+		jobs = []
+
+		for dataresult in dataresults:
+			(cururi, host, port, selector, data) = dataresult
+			subhostscount(host)
+			storerawdata(cachedir, cururi, data, host=host, port=port)
+			menudata = parsemenu(data)
+			#print(menudata)
+			for mi in menudata:
+				# Only menus so far.
+				if mi[0] == "1":
+					# Fix menu items with ports in hosts. 
+					if ":" in mi[3]:
+						mi[3] = mi[3].split(":")[0]
+
+					guri =  "gopher://%s:%s/%s%s" % \
+							(mi[3], mi[4], mi[0], mi[2])
+
+					addhostscache(mi[3], guri, port=mi[4])
+
+			print("Uri %s done." % (cururi))
+			knownuris[cururi] = None
+
+		lenuriqueue = getqueuelen()
+		lenknownuris = len(knownuris)
+		lenknownhosts = len(hostscache)
+		print("> queue hosts = %d (%d) %s" % \
+				(lenknownhosts, lenknownhosts -
+					lastlenknownhosts, hostscache.keys()))
+		print("> uri queue len = %d (%d)" % \
+				(lenuriqueue, lenuriqueue - lastlenuriqueue))
+		print("> visited uris = %d (%d)" % \
+				(lenknownuris, lenknownuris - lastlenknownuris))
+		lastlenknownuris = lenknownuris
+		lastlenuriqueue = lenuriqueue
+		lastlenknownhosts = lenknownhosts
+
+		# TODO: Remove after debugging
+		nowdelta = datetime.now() - startnow
+		if nowdelta >= storedelta:
+			storestate()
+			startnow = datetime.now()
+
+		time.sleep(0.2) # don't be too harsh on servers
+
+		#break #oneshot
+
+	# Save at end of even single shot.
+	storestate()
+
+	return 0
+
+if __name__ == "__main__":
+	sys.exit(main(sys.argv))
+
