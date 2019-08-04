@@ -136,7 +136,6 @@ def menu2text(menu):
 # Disallow: /path
 # Allow: /path
 # Crawl-delay: seconds
-# Sitemap: /some/sitemap.xml
 def parserobots(data):
 	robots = []
 	lines = data.split("\n")
