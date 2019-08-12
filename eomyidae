@@ -429,6 +429,8 @@ def main(args):
 		starturi = largs[0]
 
 	knownuris = loadlistdb("knownuris.pickle")
+	if knownuris == []:
+		knownuris = {}
 	lastlenknownuris = len(knownuris)
 
 	def isblocked(uri):
@@ -449,38 +451,43 @@ def main(args):
 			if hostscount[host] <= 0:
 				del hostscount[host]
 
-	def addhostscache(host, uri, port=70):
+	def addhostscache(uri, host=None, port=70, selector="/"):
+		if uri != None and host == None:
+			(host, port, mtype, selector) = parseuri(uri)
+			port = int(port)
+		else:
+			try:
+				port = int(port)
+			except ValueError:
+				return
+
 		if uri in knownuris:
-			#print("ignored for queue: %s" % (uri))
+			print("ignored for queue: %s" % (uri))
 			return
 		if host == "":
-			#print("ignored for queue: %s" % (uri))
+			print("ignored for queue: %s" % (uri))
 			return
 		if isblocked(uri):
 			print("blocked by filters: %s" % (uri))
 			return
 
-		try:
-			port = int(port)
-		except ValueError:
-			return
-
 		addhostscount(host)
+
+		if not host in hostscache:
+			hostscache[host] = {}
+		if not "queue" in hostscache[host]:
+			hostscache[host]["queue"] = {}
 
 		filterrules = cacherobots(cachedir, uri, \
 				host=host, \
 				port=port, \
 				filtercache=robotscache)
 		if selectorisallowed(filterrules, selector) == True:
-			if not host in hostscache:
-				hostscache[host] = {}
-			if not "queue" in hostscache[host]:
-				hostscache[host]["queue"] = {}
 			hostscache[host]["queue"][uri] = None
-			#print("pushed to queue: %s" % (uri))
+			print("pushed to queue: %s" % (uri))
 		else:
 			pass
-			#print("blocked by robots: %s" % (uri))
+			print("blocked by robots: %s" % (uri))
 
 	def getqueuelen():
 		queuelen = 0
@@ -518,9 +525,13 @@ def main(args):
 
 	jobs = []
 	if starturi != None:
+		#print("starturi = %s" % (starturi))
 		if not isblocked(starturi):
 			(starthost, startport, startmtype, startselector) = parseuri(starturi)
-			addhostscache(hostscache, starthost, starturi)
+			addhostscache(starturi, \
+					selector=startselector, \
+					host=starthost, \
+					port=startport)
 			try:
 				jobs.append([starturi, starthost, int(startport), startselector])
 			except ValueError:
@@ -564,7 +575,9 @@ def main(args):
 					if isblocked(jobitem[0]):
 						continue
 					(host, port, mtype, selector) = parseuri(jobitem[0])
-					jobs.append([jobitem[0], host, port, selector])
+					job = [jobitem[0], host, port, selector]
+					if job not in jobs:
+						jobs.append([jobitem[0], host, port, selector])
 					hostjobs[selhost] -= 1
 
 		print("Getting %d jobs." % (len(jobs)))
@@ -591,7 +604,9 @@ def main(args):
 					guri =  "gopher://%s:%s/%s%s" % \
 							(mi[3], mi[4], mi[0], mi[2])
 
-					addhostscache(mi[3], guri, port=mi[4])
+					addhostscache(guri, host=mi[3], \
+							port=mi[4], \
+							selector=mi[2])
 
 			print("Uri %s done." % (cururi))
 			knownuris[cururi] = None
